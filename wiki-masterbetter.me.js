@@ -12365,6 +12365,8 @@ const MY_USERNAME = "xxx";
       lines.push(`Dernière erreur (résultats) : ${status.resolveError}`);
     }
 
+    // The box scrolls by itself (many terms): keep the reading position across refreshes
+    const scrollTop = box.scrollTop;
     box.replaceChildren(
       ...lines.map((line) => {
         const row = document.createElement("div");
@@ -12372,6 +12374,7 @@ const MY_USERNAME = "xxx";
         return row;
       }),
     );
+    box.scrollTop = scrollTop;
   }
 
   function aarCloudStatusLines() {
@@ -12776,6 +12779,20 @@ const MY_USERNAME = "xxx";
       }
       .wm-aar-modal {
         width: min(42rem, 92vw);
+        /* Many terms make the status long: scroll instead of cutting off the buttons below */
+        overflow-y: auto;
+        overscroll-behavior: contain;
+      }
+      .wm-aar-modal > * {
+        flex-shrink: 0;
+      }
+      .wm-aar-modal > .wm-settings-header {
+        position: sticky;
+        top: -1rem;
+        z-index: 1;
+        margin: -1rem -1rem 0.5rem;
+        padding: 1rem 1rem 0.5rem;
+        background-color: var(--color-surface-light);
       }
       .wm-aar-row {
         display: flex;
@@ -12840,6 +12857,10 @@ const MY_USERNAME = "xxx";
         font-size: 0.8rem;
         line-height: 1.5;
         font-variant-numeric: tabular-nums;
+        /* One line per term: past a few of them the box scrolls instead of pushing the buttons out of view */
+        max-height: min(14rem, 30vh);
+        overflow-y: auto;
+        overscroll-behavior: contain;
       }
     `);
 

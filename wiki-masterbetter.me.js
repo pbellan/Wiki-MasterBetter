@@ -12518,11 +12518,16 @@ const MY_USERNAME = "xxx";
       refresh();
     });
 
-    actions.append(
+    const scanRow = document.createElement("div");
+    scanRow.className = "wm-aar-row";
+    scanRow.append(
       makeButton("Scanner maintenant", () => {
         aarWake();
         setTimeout(refresh, 500);
       }),
+    );
+
+    actions.append(
       makeButton("Exporter en CSV", () =>
         exportAuctionArchive("csv").catch(console.error),
       ),
@@ -12686,15 +12691,40 @@ const MY_USERNAME = "xxx";
     cloudOptions.appendChild(enabledLabel);
     refreshCloud();
 
-    modal.append(
-      header,
-      hint,
-      termsRow,
-      legendaryRibbon,
-      statusBox,
-      actions,
-      cloudBox,
-    );
+    // Two tabs, so neither the (long) status nor the export tools push the other out of view
+    const collectPanel = document.createElement("div");
+    collectPanel.className = "wm-aar-panel";
+    collectPanel.append(hint, termsRow, legendaryRibbon, statusBox, scanRow);
+
+    const exportPanel = document.createElement("div");
+    exportPanel.className = "wm-aar-panel";
+    exportPanel.append(actions, cloudBox);
+
+    const tabBar = document.createElement("div");
+    tabBar.className = "wm-aar-tabs";
+    tabBar.setAttribute("role", "tablist");
+    const tabs = [
+      ["Collecte", collectPanel],
+      ["Export et stockage", exportPanel],
+    ].map(([label, panel]) => {
+      const tab = document.createElement("button");
+      tab.type = "button";
+      tab.className = "wm-aar-tab";
+      tab.setAttribute("role", "tab");
+      tab.textContent = label;
+      tab.addEventListener("click", () => selectTab(panel));
+      return { tab, panel };
+    });
+    const selectTab = (selected) => {
+      tabs.forEach(({ tab, panel }) => {
+        tab.setAttribute("aria-selected", String(panel === selected));
+        panel.hidden = panel !== selected;
+      });
+    };
+    tabBar.append(...tabs.map(({ tab }) => tab));
+    selectTab(collectPanel);
+
+    modal.append(header, tabBar, collectPanel, exportPanel);
     overlay.appendChild(modal);
 
     refresh();
@@ -12793,6 +12823,34 @@ const MY_USERNAME = "xxx";
         margin: -1rem -1rem 0.5rem;
         padding: 1rem 1rem 0.5rem;
         background-color: var(--color-surface-light);
+      }
+      .wm-aar-tabs {
+        display: flex;
+        gap: 0.25rem;
+        margin-bottom: 0.5rem;
+        border-bottom: 1px solid var(--color-border);
+      }
+      .wm-aar-tab {
+        padding: 0.4rem 0.9rem;
+        border: none;
+        border-bottom: 2px solid transparent;
+        background: transparent;
+        color: var(--color-foreground);
+        opacity: 0.6;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .wm-aar-tab:hover {
+        opacity: 1;
+      }
+      .wm-aar-tab[aria-selected="true"] {
+        opacity: 1;
+        color: var(--color-accent);
+        border-bottom-color: var(--color-accent);
+      }
+      .wm-aar-panel[hidden] {
+        display: none;
       }
       .wm-aar-row {
         display: flex;

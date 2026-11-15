@@ -9082,9 +9082,13 @@ const MY_USERNAME = "xxx";
   //
   // Run: a "Étiquetage en masse 🏷️" button is appended to the filter bar of /collection (div.flex-wrap.gap-2, like
   // Feature EBC's). A small modal first lists every label that has terms, each with a checkbox (all checked) so the
-  // run can be limited to some of them; "Lancer (N)" starts it. The same rows carry ▲/▼ buttons to set the order
-  // labels are processed in (a card matching several labels gets the first one). Rows are compact (drag handle,
-  // rank, checkbox, name, "N termes" whose tooltip lists the terms) and reordered by drag and drop: it is saved in localStorage under
+  // run can be limited to some of them; "Lancer (N)" starts it. The modal is drawn like Feature EVL's "Estimations"
+  // drawer: a fixed header (title, summary, "✕"), a bar of quick choices ("Tout", "Aucune", "Les N premières"), a list
+  // that scrolls on its own and a fixed footer (how many labels and terms will run, "Lancer (N)"), so nothing needs
+  // scrolling to reach them. Rows set the order labels are processed in (a card matching several labels gets the
+  // first one): compact (drag handle, rank, checkbox, name, "N termes" whose tooltip lists the terms, ⤒ ▲ ▼ buttons)
+  // and reordered by those buttons (the moved row stays in view) or by drag and drop (the list scrolls near its
+  // edges); unchecked rows are dimmed. The order is saved in localStorage under
   // "tag-run-order" (a JSON array of label names; labels missing from it come last, alphabetically; a renamed label
   // keeps its place). It then sets the site's tag filter
   // (button[aria-label="Filtrer par étiquette"]) to its "Sans étiquette" entry, then for each label and each term
@@ -9103,8 +9107,13 @@ const MY_USERNAME = "xxx";
   // A recap panel then lists, label by label, every card that was tagged as a grid of portraits with their names
   // (also shown when the run was stopped or failed, with the error on top). It is docked on the right and leaves the
   // page usable, so several cards can be reviewed in a row: clicking a portrait types the card's name in the search
-  // field, which brings the card up in the grid to be re-tagged. Only its "✕" closes it.
+  // field, which brings the card up in the grid to be re-tagged. Only its "✕" closes it. Same frame as the picker:
+  // its header ("✕", summary) and the error line stay fixed, the portraits scroll, and each label's heading (with
+  // its card count) sticks to the top while its grid scrolls.
   // Same as Feature EBC, keep the tab active during the run: background tabs get their timers throttled.
+  // The site sometimes renders inconsistently, so massTagRetry runs a failed step (tag filter, typing a term, one
+  // select-and-tag pass) a second time after closing any open modal and letting the page settle; only the second
+  // error ends the run. Stopping the run skips the retry.
   // ============================================================
   const MASS_TAG_TERMS_PREFIX = "tag-terms-";
   const MASS_TAG_ORDER_KEY = "tag-run-order";
@@ -9501,9 +9510,29 @@ const MY_USERNAME = "xxx";
       .join("|");
   }
 
-  // Returns an error message, or null when the term was fully processed (or the run was stopped). Every card
-  // tagged is added to recap (label name -> Map of card name -> portrait URL, or null).
-  async function massTagProcessTerm(name, term, recap) {
+  // The site sometimes renders inconsistently (a button or a list missing for a moment, a grid not refreshed), so a
+  // step that fails is given a second chance before the run gives up: the page is brought back to a neutral state
+  // (open modal closed, loading finished, a pause), then the same step runs once more. "step" returns an error
+  // message or null; the second error, if any, is the one reported.
+  async function massTagRetry(label, step) {
+    const error = await step();
+    if (!error || massTagState.stop) return error;
+
+    massTagLog(`${label} : ${error} -> nouvelle tentative`);
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    await massTagSleep(500);
+    await massTagWaitForIdle();
+    await massTagSleep(1500);
+    if (massTagState.stop) return error;
+
+    const retryError = await step();
+    return retryError ? `${retryError} (après une nouvelle tentative)` : null;
+  }
+
+  // Types a term in the search field and waits for the grid; returns an error message, or null
+  async function massTagSearchTerm(name, term) {
     const input = document.querySelector('input[placeholder^="Rechercher"]');
     if (!input) return "champ de recherche introuvable";
 
@@ -9511,36 +9540,66 @@ const MY_USERNAME = "xxx";
     NATIVE_INPUT_VALUE_SETTER.call(input, term);
     input.dispatchEvent(new Event("input", { bubbles: true }));
     await massTagWaitForIdle();
+    return null;
+  }
+
+  // One pass over the grid: selects the untagged cards and tags them. Returns { error, done }: an error message (or
+  // null) and whether the term has nothing left to tag. Every card tagged is added to recap.
+  async function massTagProcessRound(name, term, recap) {
+    // An empty grid (no match, or everything already tagged) has no select button: this term is done
+    if (!document.querySelector("div.hover\\:scale-105")) {
+      massTagLog(`"${term}": grid empty, done`);
+      return { error: null, done: true };
+    }
+
+    const selectModeError = await massTagResetSelectMode();
+    if (selectModeError) return { error: selectModeError, done: false };
+
+    const namesBefore = getGridCardNames();
+    const { targets, selected, cards } = await massTagSelectUntaggedCards();
+    massTagLog(`"${term}" -> ${name}: ${targets} untagged, ${selected} selected`);
+    if (targets === 0) return { error: null, done: true };
+    if (selected > targets)
+      return {
+        error: "sélection résiduelle détectée, arrêt par sécurité",
+        done: false,
+      };
+
+    const error = await massTagApplyLabel(name);
+    if (error) return { error, done: false };
+
+    if (!recap.has(name)) recap.set(name, new Map());
+    cards.forEach(({ name: cardName, image }) =>
+      recap.get(name).set(cardName, image),
+    );
+
+    if (getGridCardNames() === namesBefore)
+      return {
+        error:
+          "les cartes étiquetées sont restées dans la grille, arrêt par sécurité",
+        done: false,
+      };
+    return { error: null, done: false };
+  }
+
+  // Returns an error message, or null when the term was fully processed (or the run was stopped).
+  async function massTagProcessTerm(name, term, recap) {
+    const searchError = await massTagRetry(`${name} / « ${term} » (recherche)`, () =>
+      massTagSearchTerm(name, term),
+    );
+    if (searchError) return searchError;
 
     // The "Sans étiquette" filter is on: every card tagged below leaves the grid, so the run stays on the first page
     // until it is empty (no cards left to select) rather than paging forward
     for (let round = 0; round < 1000 && !massTagState.stop; round++) {
-      // An empty grid (no match, or everything already tagged) has no select button: this term is done
-      if (!document.querySelector("div.hover\\:scale-105")) {
-        massTagLog(`"${term}": grid empty, done`);
-        break;
-      }
-
-      const selectModeError = await massTagResetSelectMode();
-      if (selectModeError) return selectModeError;
-
-      const namesBefore = getGridCardNames();
-      const { targets, selected, cards } = await massTagSelectUntaggedCards();
-      massTagLog(`"${term}" -> ${name}: ${targets} untagged, ${selected} selected`);
-      if (targets === 0) break;
-      if (selected > targets)
-        return "sélection résiduelle détectée, arrêt par sécurité";
-
-      const error = await massTagApplyLabel(name);
+      let done = false;
+      const error = await massTagRetry(`${name} / « ${term} »`, async () => {
+        const result = await massTagProcessRound(name, term, recap);
+        done = result.done;
+        return result.error;
+      });
       if (error) return error;
-
-      if (!recap.has(name)) recap.set(name, new Map());
-      cards.forEach(({ name: cardName, image }) =>
-        recap.get(name).set(cardName, image),
-      );
-
-      if (getGridCardNames() === namesBefore)
-        return "les cartes étiquetées sont restées dans la grille, arrêt par sécurité";
+      if (done) break;
     }
     return null;
   }
@@ -9563,7 +9622,9 @@ const MY_USERNAME = "xxx";
     btn.textContent = "⏹ Arrêter l'étiquetage";
 
     const recap = new Map();
-    let error = await massTagPickTagFilter((text) => /^sans\s/i.test(text));
+    let error = await massTagRetry("filtre « Sans étiquette »", () =>
+      massTagPickTagFilter((text) => /^sans\s/i.test(text)),
+    );
     if (!error) {
       outer: for (const { name, terms } of entries) {
         for (const term of terms) {
@@ -9592,6 +9653,9 @@ const MY_USERNAME = "xxx";
   // before the site's own Escape handling, Feature CME). onClose runs whichever way it closed.
   // A docked modal is a side panel that leaves the page behind interactive: only its "✕" closes it (Escape is left
   // to the site, and there is no click-outside).
+  // Shared frame of the picker and the recap, drawn like the "Estimations" drawer (Feature EVL): a fixed header
+  // (title, summary, icon buttons), then a body that scrolls on its own, so the close button and the actions
+  // never leave the screen. Callers add their own bar between the header and the body, or a footer after it.
   function createMassTagModal(title, onClose = () => {}, docked = false) {
     document.querySelector(".wm-mass-tag-recap")?.remove();
 
@@ -9620,19 +9684,40 @@ const MY_USERNAME = "xxx";
       });
     }
 
+    const header = document.createElement("div");
+    header.className = "wm-mass-tag-header";
+
+    const titleBlock = document.createElement("div");
+    const heading = document.createElement("h2");
+    heading.className = "wm-mass-tag-title";
+    heading.textContent = title;
+    const summary = document.createElement("p");
+    summary.className = "wm-mass-tag-summary";
+    titleBlock.append(heading, summary);
+
     const closeBtn = document.createElement("button");
     closeBtn.type = "button";
-    closeBtn.className = "wm-mass-tag-recap-close";
+    closeBtn.className = "wm-mass-tag-icon-btn";
     closeBtn.textContent = "✕";
+    closeBtn.title = "Fermer";
     closeBtn.addEventListener("click", close);
 
-    const heading = document.createElement("h2");
-    heading.textContent = title;
-    panel.append(closeBtn, heading);
+    header.append(titleBlock, closeBtn);
 
+    const body = document.createElement("div");
+    body.className = "wm-mass-tag-body";
+
+    panel.append(header, body);
     overlay.appendChild(panel);
     document.body.appendChild(overlay);
-    return { panel, close };
+    return {
+      panel,
+      body,
+      close,
+      setSummary: (text) => {
+        summary.textContent = text;
+      },
+    };
   }
 
   // Lists every label with terms, each with a checkbox (all checked); resolves with the checked entries, or null
@@ -9640,42 +9725,97 @@ const MY_USERNAME = "xxx";
   function pickMassTagEntries(entries) {
     return new Promise((resolve) => {
       let result = null;
-      const { panel, close } = createMassTagModal(
-        "Étiquetage en masse : étiquettes à traiter",
+      const { panel, body, close, setSummary } = createMassTagModal(
+        "Étiquetage en masse",
         () => resolve(result),
       );
-
-      const hint = document.createElement("p");
-      hint.className = "wm-mass-tag-picker-hint";
-      hint.textContent =
-        "Seules les cartes sans étiquette sont étiquetées : une carte qui correspond à plusieurs étiquettes reçoit la première de la liste. Glissez-déposez les lignes pour les réordonner (l'ordre est mémorisé) ; survolez « N termes » pour voir les termes.";
-      panel.appendChild(hint);
 
       // Checked state travels with its entry when the rows are reordered
       const items = entries.map((entry) => ({ entry, checked: true }));
       const rows = document.createElement("div");
-      panel.appendChild(rows);
+      rows.className = "wm-mass-tag-rows";
 
-      const actions = document.createElement("div");
-      actions.className = "wm-mass-tag-picker-actions";
+      const hint = document.createElement("p");
+      hint.className = "wm-mass-tag-picker-hint";
+      hint.textContent =
+        "Seules les cartes sans étiquette sont étiquetées : une carte qui correspond à plusieurs étiquettes reçoit la première de la liste. Réordonnez avec ▲ ▼ ou par glisser-déposer (l'ordre est mémorisé) ; survolez « N termes » pour voir les termes.";
 
-      const toggleAllBtn = document.createElement("button");
-      toggleAllBtn.type = "button";
-      toggleAllBtn.textContent = "Tout cocher / décocher";
+      // Bar under the header: the quick ways of choosing what runs, always in view
+      const toolbar = document.createElement("div");
+      toolbar.className = "wm-mass-tag-toolbar";
 
+      const makeChip = (label, title, onClick) => {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "wm-mass-tag-chip";
+        chip.textContent = label;
+        chip.title = title;
+        chip.addEventListener("click", onClick);
+        return chip;
+      };
+      const setChecked = (predicate) => {
+        items.forEach((item, index) => (item.checked = predicate(index)));
+        render();
+      };
+
+      const firstInput = document.createElement("input");
+      firstInput.type = "number";
+      firstInput.min = "1";
+      firstInput.max = String(items.length);
+      firstInput.value = String(Math.min(5, items.length));
+      firstInput.className = "wm-mass-tag-first";
+      firstInput.title = "Nombre d'étiquettes à garder, en partant du haut de la liste";
+      const applyFirst = () => {
+        const count = Math.max(0, parseInt(firstInput.value, 10) || 0);
+        setChecked((index) => index < count);
+      };
+      firstInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") applyFirst();
+      });
+
+      toolbar.append(
+        makeChip("Tout", "Cocher toutes les étiquettes", () => setChecked(() => true)),
+        makeChip("Aucune", "Décocher toutes les étiquettes", () => setChecked(() => false)),
+        makeChip("Les", "Ne cocher que les premières étiquettes de la liste", applyFirst),
+        firstInput,
+        makeChip("premières", "Ne cocher que les premières étiquettes de la liste", applyFirst),
+      );
+
+      const footer = document.createElement("div");
+      footer.className = "wm-mass-tag-footer";
+      const footerInfo = document.createElement("span");
+      footerInfo.className = "wm-mass-tag-summary";
       const startBtn = document.createElement("button");
       startBtn.type = "button";
-      startBtn.className = "wm-mass-tag-btn";
+      startBtn.className = "wm-mass-tag-go";
+      footer.append(footerInfo, startBtn);
+
+      body.append(hint, rows);
+      panel.insertBefore(toolbar, body);
+      panel.appendChild(footer);
+
+      // Moves an item to a given position and keeps it in view
+      const moveTo = (item, position, focusKind) => {
+        const from = items.indexOf(item);
+        const to = Math.min(Math.max(position, 0), items.length - 1);
+        if (from === to) return;
+
+        items.splice(from, 1);
+        items.splice(to, 0, item);
+        writeMassTagOrder(items.map(({ entry }) => entry.name));
+        render(item, focusKind);
+      };
 
       // Moves the dragged item before (or after) the one it was dropped on
       let dragged = null;
       const drop = (target, after) => {
         if (!dragged || dragged === target) return;
 
-        items.splice(items.indexOf(dragged), 1);
-        items.splice(items.indexOf(target) + (after ? 1 : 0), 0, dragged);
+        const moved = dragged;
+        items.splice(items.indexOf(moved), 1);
+        items.splice(items.indexOf(target) + (after ? 1 : 0), 0, moved);
         writeMassTagOrder(items.map(({ entry }) => entry.name));
-        render();
+        render(moved);
       };
       const clearDropMarks = () =>
         rows
@@ -9686,11 +9826,22 @@ const MY_USERNAME = "xxx";
         return event.clientY > rect.top + rect.height / 2;
       };
 
-      const render = () => {
+      // The browser does not scroll a list by itself while a row is dragged: do it near the edges
+      body.addEventListener("dragover", (event) => {
+        if (!dragged) return;
+
+        const rect = body.getBoundingClientRect();
+        const edge = 48;
+        if (event.clientY < rect.top + edge) body.scrollTop -= 14;
+        else if (event.clientY > rect.bottom - edge) body.scrollTop += 14;
+      });
+
+      const render = (focusItem = null, focusKind = null) => {
         rows.replaceChildren();
         items.forEach((item, index) => {
           const row = document.createElement("div");
           row.className = "wm-mass-tag-picker-row";
+          row.classList.toggle("wm-mass-tag-off", !item.checked);
           row.draggable = true;
 
           row.addEventListener("dragstart", (event) => {
@@ -9731,6 +9882,7 @@ const MY_USERNAME = "xxx";
           checkbox.checked = item.checked;
           checkbox.addEventListener("change", () => {
             item.checked = checkbox.checked;
+            row.classList.toggle("wm-mass-tag-off", !item.checked);
             refresh();
           });
           const nameEl = document.createElement("strong");
@@ -9742,30 +9894,54 @@ const MY_USERNAME = "xxx";
           count.textContent = `${item.entry.terms.length} terme${item.entry.terms.length > 1 ? "s" : ""}`;
           count.title = item.entry.terms.join("\n");
 
-          row.append(handle, rank, label, count);
+          const makeMove = (kind, text, title, position) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "wm-mass-tag-icon-btn";
+            button.dataset.move = kind;
+            button.textContent = text;
+            button.title = title;
+            button.disabled = index === position;
+            button.addEventListener("click", () => {
+              const target =
+                kind === "up" ? index - 1 : kind === "down" ? index + 1 : position;
+              moveTo(item, target, kind);
+            });
+            return button;
+          };
+          const top = makeMove("top", "⤒", "Mettre en premier", 0);
+          const up = makeMove("up", "▲", "Monter d'un rang", 0);
+          const down = makeMove("down", "▼", "Descendre d'un rang", items.length - 1);
+
+          row.append(handle, rank, label, count, top, up, down);
           rows.appendChild(row);
+
+          if (item === focusItem) {
+            // The row moved: bring it back under the pointer and keep the same button ready for the next click
+            row.scrollIntoView({ block: "nearest" });
+            const again = row.querySelector(`[data-move="${focusKind}"]:not(:disabled)`);
+            again?.focus({ preventScroll: true });
+          }
         });
         refresh();
       };
 
       const refresh = () => {
-        const count = items.filter(({ checked }) => checked).length;
-        startBtn.disabled = count === 0;
-        startBtn.textContent = `Lancer (${count})`;
+        const checked = items.filter(({ checked }) => checked);
+        const terms = checked.reduce((sum, { entry }) => sum + entry.terms.length, 0);
+        startBtn.disabled = checked.length === 0;
+        startBtn.textContent = `Lancer (${checked.length})`;
+        setSummary(
+          `${items.length} étiquette${items.length > 1 ? "s" : ""} avec des termes, dans l'ordre de traitement`,
+        );
+        footerInfo.textContent = `${checked.length} sur ${items.length} étiquette${items.length > 1 ? "s" : ""} · ${terms} terme${terms > 1 ? "s" : ""}`;
       };
 
-      toggleAllBtn.addEventListener("click", () => {
-        const check = items.some(({ checked }) => !checked);
-        items.forEach((item) => (item.checked = check));
-        render();
-      });
       startBtn.addEventListener("click", () => {
         result = items.filter(({ checked }) => checked).map(({ entry }) => entry);
         close();
       });
 
-      actions.append(toggleAllBtn, startBtn);
-      panel.appendChild(actions);
       render();
     });
   }
@@ -9775,28 +9951,38 @@ const MY_USERNAME = "xxx";
       (sum, cards) => sum + cards.size,
       0,
     );
-    const { panel } = createMassTagModal(
-      `Étiquetage en masse : ${total} carte${total > 1 ? "s" : ""} étiquetée${total > 1 ? "s" : ""}`,
+    const { panel, body, setSummary } = createMassTagModal(
+      "Étiquetage en masse",
       undefined,
       true,
     );
+    setSummary(
+      `${total} carte${total > 1 ? "s" : ""} étiquetée${total > 1 ? "s" : ""}, dans ${recap.size} étiquette${recap.size > 1 ? "s" : ""}`,
+    );
+
+    // Fixed under the header, so it stays in view however far the list is scrolled
+    if (error) {
+      const errorEl = document.createElement("p");
+      errorEl.className = "wm-mass-tag-recap-error";
+      errorEl.textContent = `Étiquetage interrompu : ${error}`;
+      panel.insertBefore(errorEl, body);
+    }
 
     const hint = document.createElement("p");
     hint.className = "wm-mass-tag-picker-hint";
     hint.textContent =
       "Cliquez sur une carte pour la chercher dans la collection et la reclasser.";
-    panel.appendChild(hint);
-
-    if (error) {
-      const errorEl = document.createElement("p");
-      errorEl.className = "wm-mass-tag-recap-error";
-      errorEl.textContent = `Étiquetage interrompu : ${error}`;
-      panel.appendChild(errorEl);
-    }
+    body.appendChild(hint);
 
     recap.forEach((cards, name) => {
       const heading = document.createElement("h3");
-      heading.textContent = `${name} (${cards.size})`;
+      heading.className = "wm-mass-tag-section";
+      const headingName = document.createElement("span");
+      headingName.textContent = name;
+      const headingCount = document.createElement("span");
+      headingCount.className = "wm-mass-tag-section-count";
+      headingCount.textContent = String(cards.size);
+      heading.append(headingName, headingCount);
       const grid = document.createElement("div");
       grid.className = "wm-mass-tag-recap-grid";
       Array.from(cards)
@@ -9831,7 +10017,7 @@ const MY_USERNAME = "xxx";
           tile.appendChild(caption);
           grid.appendChild(tile);
         });
-      panel.append(heading, grid);
+      body.append(heading, grid);
     });
   }
 
@@ -9912,44 +10098,161 @@ const MY_USERNAME = "xxx";
         background: rgba(0, 0, 0, 0.6);
       }
       .wm-mass-tag-recap-panel {
-        position: relative;
+        display: flex;
+        flex-direction: column;
         width: min(40rem, 92vw);
-        max-height: 80vh;
-        overflow-y: auto;
-        padding: 1.25rem 1.5rem;
+        max-height: 88vh;
+        overflow: hidden;
         border-radius: 0.75rem;
+        border: 1px solid var(--color-border);
+        background: var(--color-surface);
+        color: var(--color-foreground);
+      }
+      .wm-mass-tag-header {
+        display: flex;
+        align-items: flex-start;
+        gap: 0.25rem;
+        flex-shrink: 0;
+        padding: 1rem 1rem 0.75rem;
+        border-bottom: 1px solid var(--color-border);
+      }
+      .wm-mass-tag-header > :first-child {
+        flex: 1;
+        min-width: 0;
+      }
+      .wm-mass-tag-title {
+        font-family: var(--font-heading);
+        font-size: 1.25rem;
+        font-weight: 700;
+      }
+      .wm-mass-tag-summary {
+        font-size: 0.8rem;
+        opacity: 0.5;
+      }
+      .wm-mass-tag-body {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        padding: 0 1rem 0.75rem;
+      }
+      .wm-mass-tag-toolbar,
+      .wm-mass-tag-footer {
+        display: flex;
+        flex-shrink: 0;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.625rem 1rem;
+      }
+      .wm-mass-tag-toolbar {
+        flex-wrap: wrap;
+        border-bottom: 1px solid var(--color-border);
+      }
+      /* Same look as the "Estimations" drawer's chips and icon buttons (Feature EVL), which may be disabled */
+      .wm-mass-tag-chip {
+        padding: 0.25rem 0.75rem;
+        border: none;
+        border-radius: 9999px;
+        background: var(--color-surface-light);
+        color: inherit;
+        font-size: 0.75rem;
+        font-weight: 600;
+        opacity: 0.7;
+        cursor: pointer;
+        transition: opacity 0.2s ease;
+      }
+      .wm-mass-tag-chip:hover {
+        opacity: 1;
+      }
+      .wm-mass-tag-icon-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 1.75rem;
+        height: 1.75rem;
+        border: none;
+        border-radius: 0.375rem;
+        background: transparent;
+        color: inherit;
+        font-size: 0.85rem;
+        opacity: 0.6;
+        cursor: pointer;
+        transition: background-color 0.2s ease, opacity 0.2s ease;
+      }
+      .wm-mass-tag-icon-btn:hover:not(:disabled) {
+        opacity: 1;
+        background: var(--color-surface-light);
+      }
+      .wm-mass-tag-first {
+        width: 3.5rem;
+        padding: 0.2rem 0.4rem;
+        border-radius: 0.5rem;
         border: 1px solid var(--color-border);
         background: var(--color-background);
         color: var(--color-foreground);
+        font-size: 0.75rem;
+        text-align: center;
       }
-      .wm-mass-tag-recap-panel h2 {
-        font-size: 1.125rem;
-        font-weight: 700;
-        padding-right: 2rem;
+      .wm-mass-tag-footer {
+        justify-content: space-between;
+        border-top: 1px solid var(--color-border);
       }
-      .wm-mass-tag-recap-panel h3 {
-        margin-top: 1rem;
+      .wm-mass-tag-go {
+        padding: 0.4rem 1.1rem;
+        border: none;
+        border-radius: 0.5rem;
+        background: #1d4ed8;
+        color: #fff;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background-color 0.2s ease, opacity 0.2s ease;
+      }
+      .wm-mass-tag-go:hover:not(:disabled) {
+        background: #2563eb;
+      }
+      .wm-mass-tag-go:disabled {
+        cursor: default;
+        opacity: 0.3;
+      }
+      .wm-mass-tag-docked {
+        justify-content: flex-end;
+        align-items: stretch;
+        padding: 0;
+        background: none;
+        pointer-events: none;
+      }
+      .wm-mass-tag-docked .wm-mass-tag-recap-panel {
+        width: min(28rem, 42vw);
+        max-height: none;
+        border-radius: 0;
+        border-width: 0 0 0 1px;
+        pointer-events: auto;
+        box-shadow: 0 0 24px rgba(0, 0, 0, 0.5);
+      }
+      .wm-mass-tag-section {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        margin: 0 -1rem;
+        padding: 0.6rem 1rem 0.35rem;
+        border-bottom: 1px solid var(--color-border);
+        background: var(--color-surface);
         font-size: 0.875rem;
         font-weight: 700;
+      }
+      .wm-mass-tag-section-count {
+        font-size: 0.75rem;
+        font-variant-numeric: tabular-nums;
+        color: var(--color-accent);
       }
       .wm-mass-tag-recap-grid {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(5.5rem, 1fr));
         gap: 0.5rem;
         margin-top: 0.5rem;
-      }
-      .wm-mass-tag-docked {
-        justify-content: flex-end;
-        align-items: stretch;
-        padding: 1rem;
-        background: none;
-        pointer-events: none;
-      }
-      .wm-mass-tag-docked .wm-mass-tag-recap-panel {
-        width: min(26rem, 40vw);
-        max-height: none;
-        pointer-events: auto;
-        box-shadow: 0 0 24px rgba(0, 0, 0, 0.5);
       }
       .wm-mass-tag-recap-grid figure {
         margin: 0;
@@ -9979,50 +10282,57 @@ const MY_USERNAME = "xxx";
         -webkit-box-orient: vertical;
       }
       .wm-mass-tag-picker-hint {
-        margin-top: 0.5rem;
+        margin: 0.6rem 0 0.4rem;
         font-size: 0.75rem;
         opacity: 0.6;
       }
       .wm-mass-tag-picker-row {
-        display: flex;
+        display: grid;
+        grid-template-columns: 1.1rem 1.5rem minmax(0, 1fr) auto 1.75rem 1.75rem 1.75rem;
         align-items: center;
-        gap: 0.5rem;
-        margin-top: 0.25rem;
+        gap: 0.4rem;
         padding: 0.3rem 0.5rem;
-        border-radius: 0.5rem;
-        border: 1px solid var(--color-border);
-        border-top-width: 2px;
-        border-bottom-width: 2px;
-        font-size: 0.8rem;
+        border-bottom: 1px solid var(--color-border);
+        border-top: 2px solid transparent;
+        font-size: 0.85rem;
+      }
+      .wm-mass-tag-picker-row.wm-mass-tag-off {
+        opacity: 0.45;
       }
       .wm-mass-tag-picker-row.wm-dragging {
-        opacity: 0.4;
+        opacity: 0.3;
       }
       .wm-mass-tag-picker-row.wm-drop-before {
         border-top-color: var(--color-accent);
       }
       .wm-mass-tag-picker-row.wm-drop-after {
-        border-bottom-color: var(--color-accent);
+        border-bottom: 2px solid var(--color-accent);
       }
       .wm-mass-tag-picker-row label {
-        flex: 1;
         display: flex;
         align-items: center;
         gap: 0.5rem;
+        min-width: 0;
         cursor: pointer;
+      }
+      .wm-mass-tag-picker-row strong {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       .wm-mass-tag-picker-handle {
         cursor: grab;
         opacity: 0.5;
         user-select: none;
+        font-size: 1rem;
       }
       .wm-mass-tag-picker-row:hover .wm-mass-tag-picker-handle {
         opacity: 1;
       }
       .wm-mass-tag-picker-rank {
-        min-width: 1.25rem;
         text-align: right;
-        font-size: 0.7rem;
+        font-size: 0.75rem;
+        font-variant-numeric: tabular-nums;
         opacity: 0.5;
       }
       .wm-mass-tag-picker-count {
@@ -10031,42 +10341,17 @@ const MY_USERNAME = "xxx";
         cursor: help;
         text-decoration: underline dotted;
       }
-      .wm-mass-tag-picker-actions {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        margin-top: 1rem;
-        font-size: 0.75rem;
-      }
-      .wm-mass-tag-picker-actions button:not(.wm-mass-tag-btn) {
-        background: none;
-        border: none;
-        cursor: pointer;
-        opacity: 0.7;
-        text-decoration: underline;
-        color: inherit;
-      }
-      .wm-mass-tag-btn:disabled {
+      .wm-mass-tag-picker-row .wm-mass-tag-icon-btn:disabled {
+        opacity: 0.15;
         cursor: default;
-        opacity: 0.3;
       }
       .wm-mass-tag-recap-error {
-        margin-top: 0.5rem;
+        flex-shrink: 0;
+        margin: 0;
+        padding: 0.5rem 1rem;
+        border-bottom: 1px solid var(--color-border);
         color: #f87171;
         font-size: 0.8rem;
-      }
-      .wm-mass-tag-recap-close {
-        position: absolute;
-        top: 0.75rem;
-        right: 0.75rem;
-        background: none;
-        border: none;
-        cursor: pointer;
-        opacity: 0.6;
-        color: inherit;
-      }
-      .wm-mass-tag-recap-close:hover {
-        opacity: 1;
       }
     `);
 

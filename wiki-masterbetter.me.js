@@ -9102,7 +9102,9 @@ const MY_USERNAME = "xxx";
   // aborts if the selection holds more cards than were clicked (a leftover selection would tag unrelated cards), or
   // if the grid is unchanged after tagging. Every failure is reported with what the script found instead.
   // Transfer: the tag manager modal also gets "Exporter les termes" / "Importer des termes" links under its title,
-  // to save the terms and the run order to a JSON file and load them on another computer (see exportMassTagSettings).
+  // to save the terms and the run order to a JSON file and load them on another computer (see exportMassTagSettings),
+  // and "Nettoyer les orphelins" to drop the terms (and run-order entries) of labels that no longer exist on the
+  // site: the labels still there are the rows of the open modal (see cleanOrphanMassTagTerms; it confirms first).
   // The button turns into a stop button while running; the filter, search field and select mode are reset at the end.
   // A recap panel then lists, label by label, every card that was tagged as a grid of portraits with their names
   // (also shown when the run was stopped or failed, with the error on top). It is docked on the right and leaves the
@@ -9189,6 +9191,55 @@ const MY_USERNAME = "xxx";
     return count;
   }
 
+  // Labels deleted on the site leave their terms (and their place in the run order) behind. The labels still on the
+  // site are the rows of the open modal, so that is where the cleanup runs: whatever is stored for a name that has
+  // no row is listed and, once confirmed, removed. Refuses when a row is being renamed (its name is not readable)
+  // or when no row is there yet (the list is not loaded: everything would look orphaned).
+  function cleanOrphanMassTagTerms(modal) {
+    const rows = Array.from(modal.querySelectorAll("div.rounded-xl.border"));
+    const names = rows.map(getTagManagerRowName);
+    if (!rows.length || names.includes(null)) {
+      window.alert(
+        "Impossible de comparer pour l'instant : terminez le renommage en cours, ou attendez que la liste des étiquettes soit chargée.",
+      );
+      return;
+    }
+
+    const present = new Set(names);
+    const orphans = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key?.startsWith(MASS_TAG_TERMS_PREFIX)) continue;
+
+      const name = key.slice(MASS_TAG_TERMS_PREFIX.length);
+      if (present.has(name)) continue;
+
+      orphans.push({ key, name, terms: parseMassTagTerms(localStorage.getItem(key)) });
+    }
+    const staleOrder = readMassTagOrder().filter((name) => !present.has(name));
+    if (!orphans.length && !staleOrder.length) {
+      window.alert("Rien à nettoyer : chaque étiquette qui a des termes existe encore.");
+      return;
+    }
+
+    const lines = orphans.map(
+      ({ name, terms }) =>
+        `• ${name} (${terms.length} terme${terms.length > 1 ? "s" : ""} : ${terms.join(", ")})`,
+    );
+    if (
+      !window.confirm(
+        `Ces étiquettes n'existent plus sur le site. Supprimer leurs termes ?\n\n${lines.join("\n") || "(aucun terme, seulement des entrées de l'ordre de traitement)"}\n\nCette action est définitive : pensez à exporter les termes avant si besoin.`,
+      )
+    )
+      return;
+
+    orphans.forEach(({ key }) => localStorage.removeItem(key));
+    writeMassTagOrder(readMassTagOrder().filter((name) => present.has(name)));
+    window.alert(
+      `${orphans.length} étiquette${orphans.length > 1 ? "s" : ""} orpheline${orphans.length > 1 ? "s" : ""} nettoyée${orphans.length > 1 ? "s" : ""}.`,
+    );
+  }
+
   function insertMassTagIoBar() {
     document.querySelectorAll(".wm-tag-manager-modal h2").forEach((heading) => {
       const modal = heading.closest(".wm-tag-manager-modal");
@@ -9234,6 +9285,11 @@ const MY_USERNAME = "xxx";
             }
             exportMassTagSettings();
           },
+        ),
+        makeButton(
+          "🧹 Nettoyer les orphelins",
+          "Supprime les termes (et la place dans l'ordre de traitement) des étiquettes qui n'existent plus sur le site",
+          () => cleanOrphanMassTagTerms(modal),
         ),
         makeButton(
           "⬆ Importer des termes",
@@ -11502,7 +11558,7 @@ const MY_USERNAME = "xxx";
   function aarParseTermsInput(text) {
     const seen = new Set();
     return text
-      .split(",")
+      .split(/[,\n]/)
       .map((term) => term.trim())
       .filter((term) => {
         const key = term.toLowerCase();
@@ -12728,10 +12784,13 @@ const MY_USERNAME = "xxx";
     const termsRow = document.createElement("div");
     termsRow.className = "wm-aar-row";
 
-    const termsInput = document.createElement("input");
-    termsInput.type = "text";
-    termsInput.className = "wm-aar-input";
-    termsInput.placeholder = "Termes séparés par des virgules (ex : avion, bateau)";
+    // A wide, wrapping box (it grows with the terms) instead of a one-line field: many terms stay readable
+    const termsInput = document.createElement("textarea");
+    termsInput.className = "wm-aar-input wm-aar-terms";
+    termsInput.rows = 3;
+    termsInput.spellcheck = false;
+    termsInput.placeholder =
+      "Termes séparés par des virgules (ex : avion, bateau). Entrée enregistre, Maj+Entrée va à la ligne.";
     termsInput.value = aarReadTerms().join(", ");
 
     const saveBtn = document.createElement("button");
@@ -12785,7 +12844,10 @@ const MY_USERNAME = "xxx";
     };
     saveBtn.addEventListener("click", save);
     termsInput.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") save();
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        save();
+      }
     });
     legendaryToggle.addEventListener("change", () => {
       try {
@@ -13093,7 +13155,7 @@ const MY_USERNAME = "xxx";
         background-color: var(--color-surface-light);
       }
       .wm-aar-modal {
-        width: min(42rem, 92vw);
+        width: min(56rem, 94vw);
         /* Many terms make the status long: scroll instead of cutting off the buttons below */
         overflow-y: auto;
         overscroll-behavior: contain;
@@ -13152,6 +13214,16 @@ const MY_USERNAME = "xxx";
         background: transparent;
         color: var(--color-foreground);
         font-size: 0.85rem;
+      }
+      .wm-aar-terms {
+        flex: 1 1 100%;
+        min-height: 4.5rem;
+        max-height: 40vh;
+        resize: vertical;
+        font-family: inherit;
+        line-height: 1.45;
+        /* Grows with its content where supported (Chromium); elsewhere the handle resizes it */
+        field-sizing: content;
       }
       .wm-aar-btn {
         padding: 0.4rem 0.9rem;

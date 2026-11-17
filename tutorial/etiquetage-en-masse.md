@@ -37,10 +37,11 @@ Quelques conseils pour bien choisir les termes :
 
 ### Sauvegarder ou transférer vos termes
 
-Sous le titre de la fenêtre, deux liens (3) :
+Sous le titre de la fenêtre, trois liens (3) :
 
 - **⬇ Exporter les termes** enregistre tous vos termes et l'ordre de traitement dans un fichier `wmb-etiquetage-en-masse.json` ;
-- **⬆ Importer des termes** charge un tel fichier (par exemple sur un autre ordinateur, avec le même compte). Les termes des étiquettes présentes dans le fichier sont remplacés ; les autres étiquettes ne sont pas touchées.
+- **⬆ Importer des termes** charge un tel fichier (par exemple sur un autre ordinateur, avec le même compte). Les termes des étiquettes présentes dans le fichier sont remplacés ; les autres étiquettes ne sont pas touchées ;
+- **🧹 Nettoyer les orphelins** supprime les termes des étiquettes qui n'existent plus sur le site (une confirmation les liste d'abord).
 
 Fermez ensuite la fenêtre (touche Échap ou clic à côté).
 

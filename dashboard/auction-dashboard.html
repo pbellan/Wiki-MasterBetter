@@ -113,6 +113,22 @@
   .pbox label { display: grid; grid-template-columns: 1fr 5rem; gap: 8px; align-items: center; font-size: 13px; }
   .pbox input { width: 100%; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--border); background: transparent; text-align: right; }
 
+  /* ---------- « Quand enchérir » (détail d'une carte) ---------- */
+  .when { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; margin: 12px 0 4px; }
+  .when h3 { margin: 0 0 2px; }
+  .when .hint { color: var(--muted); font-size: 12px; margin: 2px 0 8px; }
+  .when p.line { margin: 6px 0 0; font-size: 13.5px; line-height: 1.45; }
+  .when p.line strong { font-weight: 650; }
+  .hours { display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 2px; margin: 8px 0 4px; }
+  @media (max-width: 640px) { .hours { grid-template-columns: repeat(12, minmax(0, 1fr)); } }
+  .hcell { border-radius: 4px; background: var(--wash); text-align: center; font-size: 10.5px; padding: 7px 0 5px; color: var(--ink2); cursor: default; }
+  .hcell.good { background: color-mix(in srgb, var(--good) calc(var(--a) * 70%), var(--wash)); }
+  .hcell.bad { background: color-mix(in srgb, var(--bad) calc(var(--a) * 70%), var(--wash)); }
+  .hcell.now { outline: 2px solid var(--ink); outline-offset: 1px; font-weight: 700; }
+  .hcell:focus-visible { outline: 2px solid var(--s1); outline-offset: 1px; }
+  .when .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--muted); font-size: 11.5px; }
+  .when .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: -1px; margin-right: 4px; }
+
   /* ---------- tiles ---------- */
   .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-bottom: 26px; }
   .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
@@ -1052,6 +1068,122 @@ function renderAll() {
 }
 
 /* =====================================================================
+   Quand enchérir : prix typique selon l'heure de fin (heure de Paris)
+   Pour chaque vente « évaluable » (mêmes seuils que les bonnes affaires), on compare le prix payé à la médiane des
+   autres ventes de la même carte (plafonné à ×3 pour qu'une aberration ne pèse pas trop), puis on regarde ce rapport
+   selon l'heure de fin, pour la rareté de la carte, en fenêtres glissantes de 3 h. Une heure est « favorable » à
+   l'acheteur si les ventes y sont nettement moins chères que la moyenne (écart significatif et d'au moins 4 %), et
+   « défavorable » dans le cas inverse : le même résultat dit à quelles heures ne pas terminer sa propre enchère.
+   ===================================================================== */
+const WHEN_CAP = 3, WHEN_MIN_SALES = 200, WHEN_MIN_GAP = 0.04, WHEN_Z = 2;
+function whenSales() {
+  const P = state.params, key = P.minComp + "|" + P.minRef;
+  if (state.whenCache?.key === key) return state.whenCache.list;
+  const list = [];
+  state.recs.forEach((r) => {
+    if (!r.sold || r.final == null || r.hour == null) return;
+    const g = state.groups.get(r.key);
+    if (!g || g.prices.length - 1 < P.minComp) return;
+    const ref = looMedian(g.prices, r.final);
+    if (ref == null || ref < P.minRef) return;
+    list.push({ rarity: r.rarity, hour: r.hour, ratio: Math.min(r.final / ref, WHEN_CAP) });
+  });
+  state.whenCache = { key, list };
+  return list;
+}
+function whenProfile(rarity) {
+  const sales = whenSales().filter((e) => e.rarity === rarity);
+  if (sales.length < WHEN_MIN_SALES) return null;
+  const n = Array(24).fill(0), sum = Array(24).fill(0);
+  sales.forEach((e) => { n[e.hour]++; sum[e.hour] += e.ratio; });
+  const mean = sales.reduce((a, e) => a + e.ratio, 0) / sales.length;
+  const sd = Math.sqrt(sales.reduce((a, e) => a + (e.ratio - mean) ** 2, 0) / sales.length) || 1;
+  const hours = Array.from({ length: 24 }, (_, h) => {
+    let nn = 0, ss = 0;
+    for (let d = -1; d <= 1; d++) { const k = (h + d + 24) % 24; nn += n[k]; ss += sum[k]; }
+    const m = nn ? ss / nn : mean, rel = m / mean - 1, z = nn ? (m - mean) / (sd / Math.sqrt(nn)) : 0;
+    const kind = z <= -WHEN_Z && rel <= -WHEN_MIN_GAP ? "good" : z >= WHEN_Z && rel >= WHEN_MIN_GAP ? "bad" : "";
+    return { h, n: nn, rel, z, kind };
+  });
+  return { hours, total: sales.length };
+}
+/* Runs of consecutive hours (wrapping around midnight) matching a predicate */
+function hourRuns(hours, pred) {
+  const on = hours.map(pred);
+  if (on.every(Boolean)) return [{ from: 0, to: 23 }];
+  const start = on.findIndex((v) => !v), runs = [];
+  let cur = null;
+  for (let i = 1; i <= 24; i++) {
+    const h = (start + i) % 24;
+    if (on[h]) { if (!cur) cur = { from: h, to: h }; else cur.to = h; } else if (cur) { runs.push(cur); cur = null; }
+  }
+  if (cur) runs.push(cur);
+  return runs;
+}
+const fmtRuns = (runs) => runs.map((r) => `entre ${r.from} h et ${(r.to + 1) % 24} h`).join(", ou ");
+function whenBlock(card) {
+  const wrap = el("div", { class: "when" });
+  wrap.append(el("h3", { text: "Quand enchérir ?" }));
+  const prof = whenProfile(card.rarity);
+  if (!prof) {
+    wrap.append(el("p", { class: "hint", text: "Pas assez de ventes comparables pour cette rareté dans l'archive : aucune heure ne peut être recommandée." }));
+    return wrap;
+  }
+  wrap.append(el("p", { class: "hint", text: "Prix payé selon l'heure de fin de l'enchère (heure de Paris), par rapport à la moyenne des ventes de la rareté. Vert : les ventes y sont moins chères ; rouge : plus chères." }));
+  const nowH = parisHour(Date.now());
+  const strip = el("div", { class: "hours" });
+  prof.hours.forEach((x) => {
+    const t = { title: `Fin entre ${x.h} h et ${x.h + 1} h`, rows: [{ value: (x.rel > 0 ? "+" : "") + (x.rel * 100).toFixed(1).replace(".", ",") + " %", label: "prix, par rapport à la moyenne" }, { value: fmtInt(x.n), label: "ventes (fenêtre de 3 h)" }] };
+    const cell = el("div", { class: "hcell" + (x.kind ? " " + x.kind : "") + (x.h === nowH ? " now" : ""), tabindex: "0", text: String(x.h), style: `--a:${Math.min(1, Math.abs(x.z) / 4).toFixed(2)}`, "aria-label": `${t.title} : ${t.rows[0].value} ${t.rows[0].label}` });
+    cell.addEventListener("mouseenter", (e) => showTip(e.clientX, e.clientY, t));
+    cell.addEventListener("mousemove", (e) => showTip(e.clientX, e.clientY, t));
+    cell.addEventListener("mouseleave", hideTip);
+    cell.addEventListener("focus", () => tipAtElement(cell, t));
+    cell.addEventListener("blur", hideTip);
+    strip.append(cell);
+  });
+  wrap.append(strip, el("div", { class: "legend" }, el("span", {}, el("i", { style: "background:var(--good)" }), "moins cher"), el("span", {}, el("i", { style: "background:var(--bad)" }), "plus cher"), el("span", { text: "contour : heure actuelle" })));
+
+  const good = prof.hours.filter((x) => x.kind === "good"), bad = prof.hours.filter((x) => x.kind === "bad");
+  const avgRel = (list) => list.reduce((a, x) => a + x.rel * x.n, 0) / list.reduce((a, x) => a + x.n, 0);
+  const pct = (v) => Math.abs(v * 100).toFixed(0) + " %";
+  const line = (...kids) => el("p", { class: "line" }, ...kids);
+  if (!good.length && !bad.length) {
+    wrap.append(line("Aucune heure ne se démarque nettement pour cette rareté : l'heure de fin compte peu dans le prix."));
+  } else {
+    if (good.length) {
+      const runs = hourRuns(prof.hours, (x) => x.kind === "good");
+      const inRun = runs.find((r) => (r.from <= r.to ? nowH >= r.from && nowH <= r.to : nowH >= r.from || nowH <= r.to));
+      const next = runs.map((r) => (r.from - nowH + 24) % 24).sort((a, b) => a - b)[0];
+      wrap.append(line("✅ ", el("strong", { text: "Pour enchérir : " }), `visez les enchères qui se terminent ${fmtRuns(runs)} (ventes ≈ ${pct(avgRel(good))} moins chères que la moyenne). `, inRun ? "Vous y êtes en ce moment." : `Prochain créneau dans ${next} h.`));
+      // This card's own sales, inside and outside those hours
+      const g = state.groups.get(card.key);
+      if (g) {
+        const P = state.params, goodSet = new Set(good.map((x) => x.h)), inn = [], out = [];
+        g.recs.forEach((r) => {
+          if (g.prices.length - 1 < 3) return;
+          const ref = looMedian(g.prices, r.final);
+          if (ref == null || ref < P.minRef) return;
+          (goodSet.has(r.hour) ? inn : out).push(Math.min(r.final / ref, WHEN_CAP));
+        });
+        if (inn.length >= 3 && out.length >= 3) {
+          wrap.append(line("Pour cette carte : ", el("strong", { text: `${fmtPct(median(inn))} de son prix médian` }), ` dans ces créneaux (${inn.length} ventes), contre ${fmtPct(median(out))} le reste du temps (${out.length} ventes).`));
+        }
+      }
+    }
+    if (bad.length || good.length) {
+      const goodRuns = good.length ? hourRuns(prof.hours, (x) => x.kind === "good") : [];
+      const badRuns = bad.length ? hourRuns(prof.hours, (x) => x.kind === "bad") : [];
+      wrap.append(line("⛔ ", el("strong", { text: "Pour votre propre enchère : " }),
+        good.length ? `évitez de la terminer ${fmtRuns(goodRuns)} : elle y part moins cher. ` : "",
+        bad.length ? `Elle part mieux ${fmtRuns(badRuns)} (ventes ≈ ${pct(avgRel(bad))} plus chères que la moyenne).` : ""));
+    }
+  }
+  wrap.append(el("p", { class: "hint", style: "margin:8px 0 0", text: `Calculé sur ${fmtInt(prof.total)} ventes de rareté ${card.rarity}, quels que soient les filtres. L'effet est modeste et le prix dépend d'abord de la carte : prenez-le comme un coup de pouce, pas une règle.` }));
+  return wrap;
+}
+
+/* =====================================================================
    Détail d'une carte
    ===================================================================== */
 function openCard(key) {
@@ -1071,6 +1203,7 @@ function openCard(key) {
   );
   const body = el("div");
   dlg.replaceChildren(head, mt, body);
+  body.append(whenBlock(first));
   dlg.showModal();
   const pts = s.map((r) => ({ x: r.end, y: r.final, tip: { title: dateFmt.format(r.end), rows: [{ value: fmtInt(r.final), label: `payé (départ ${fmtInt(r.start)})` }, { value: fmtInt(r.bidders), label: "enchérisseurs" }, { value: fmtDur(r.lastBidSec), label: "dernière mise avant la fin" }] } }));
   if (pts.length >= 2) {
@@ -1199,6 +1332,7 @@ function load(raw, name) {
   if (!Array.isArray(raw)) throw new Error("Le fichier n'est pas un export de l'archive (tableau JSON attendu).");
   state.recs = prepare(raw);
   state.groups = buildGroups(state.recs);
+  state.whenCache = null;
   state.termCounts = new Map();
   state.recs.forEach((r) => r.tkeys.forEach((t) => state.termCounts.set(t, (state.termCounts.get(t) || 0) + 1)));
   // « Any » toujours en premier, puis les termes du plus au moins fréquent

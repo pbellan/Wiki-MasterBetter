@@ -4756,7 +4756,7 @@ const MY_USERNAME = "xxx";
     },
     {
       title: "Archiver des enchères en direct",
-      text: "Le bouton 📦 du menu de gauche ouvre l'archive des enchères. Saisissez des termes de recherche (ex : avion, bateau), et/ou cochez « Légendaires » pour archiver toutes les enchères de cartes Légendaires sans terme : toutes les 5 minutes, les enchères correspondantes sont enregistrées dans votre navigateur, puis leur résultat (prix final, nombre d'enchères et d'enchérisseurs) est relevé une fois l'enchère terminée, avec le détail des mises. Un onglet wiki-masters.com doit rester ouvert (un seul onglet collecte à la fois). L'archive s'exporte en CSV ou en JSON, et un export JSON se réimporte (« Importer (JSON) ») pour transférer l'archive vers un autre navigateur ou ordinateur : les enchères sont fusionnées, rien n'est supprimé ; « Compacter » supprime le détail des mises des enchères de plus de 30 jours pour gagner de la place. Pour garder l'archive à l'abri (ou la transférer d'un navigateur à l'autre), la section « Export Cloudflare » l'envoie chaque jour vers votre propre espace Cloudflare (mise en place dans le dossier cloudflare/ du dépôt), et « Importer depuis Cloudflare » la récupère.",
+      text: "Le bouton 📦 du menu de gauche ouvre l'archive des enchères. Saisissez des termes de recherche (ex : avion, bateau), éventuellement limités à certaines raretés (ex : acteur:L, avion:UR+SR ; les termes s'affichent en pastilles dont un clic ouvre un sélecteur de raretés) : toutes les 5 minutes, les enchères correspondantes sont enregistrées dans votre navigateur, puis leur résultat (prix final, nombre d'enchères et d'enchérisseurs) est relevé une fois l'enchère terminée, avec le détail des mises. Un onglet wiki-masters.com doit rester ouvert (un seul onglet collecte à la fois). L'archive s'exporte en CSV ou en JSON, et un export JSON se réimporte (« Importer (JSON) ») pour transférer l'archive vers un autre navigateur ou ordinateur : les enchères sont fusionnées, rien n'est supprimé ; « Compacter » supprime le détail des mises des enchères de plus de 30 jours pour gagner de la place. Pour garder l'archive à l'abri (ou la transférer d'un navigateur à l'autre), la section « Export Cloudflare » l'envoie chaque jour vers votre propre espace Cloudflare (mise en place dans le dossier cloudflare/ du dépôt), et « Importer depuis Cloudflare » la récupère.",
     },
     {
       title: "Historique des prix d'une carte",
@@ -11413,14 +11413,17 @@ const MY_USERNAME = "xxx";
   // The archive can also be sent on its own, once or twice a day, to the user's own Cloudflare Worker (the modal's
   // "Export Cloudflare" section; see "Cloud export" below and cloudflare/README.md).
   //
-  // A ribbon with a checkbox ("Légendaires", localStorage "wm-auction-archive-legendary") adds one more source to
-  // the discovery: GET /api/marketplace?page=N&limit=50&sort=recent&rarity=L, crawled exactly like a term (same stop
-  // rule) and stored in the records' "terms" under the label AAR_LEGENDARY_LABEL ("rarity:L"). It works with no term.
+  // A term can be limited to some rarities with "term:L+UR" (codes in AAR_RARITIES; see aarParseSource): the search
+  // then adds one "&rarity=" per code (GET /api/marketplace?...&q=term&rarity=L&rarity=UR, still one request per page)
+  // and the normalised text ("term:L+UR") is the source's label, stored in the records' "terms". "acteur" and
+  // "acteur:L" are two sources (the second is a subset of the first, an auction is stored once). The modal shows the
+  // typed terms as chips with coloured rarity badges; a click opens a picker that rewrites the term in the box.
+  // A rarity with no term is not supported (too many results to follow); the former "Légendaires" toggle was dropped.
   //
   // Collection, in a loop that only ever runs in ONE tab (a Web Lock, "wmb-auction-archive-crawler": the other
   // tabs queue on it and take over when the leader tab closes). It needs a wiki-masters.com tab left open: a
   // closed tab, or one the browser discarded to save memory, collects nothing. Every 5 minutes it:
-  //   1. Discovers — for each term (and the Legendary source), pages through GET /api/marketplace?page=N&limit=50&sort=recent&q={term}
+  //   1. Discovers — for each source (term, with its optional rarities), pages through GET /api/marketplace?page=N&limit=50&sort=recent&q={term}
   //      (newest first) and upserts every auction. It stops at the first page that holds nothing new for that
   //      term, so a regular pass costs one request per term; the first pass of a new term walks the whole list
   //      (AAR_MAX_PAGES at most). An auction already known has its end time refreshed (it may be extended).
@@ -11443,9 +11446,18 @@ const MY_USERNAME = "xxx";
   const AAR_STORE = "auctions";
   const AAR_TERMS_KEY = "wm-auction-archive-terms";
   const AAR_STATUS_KEY = "wm-auction-archive-status";
+  // Former "Légendaires" toggle (every Legendary auction with no search term): dropped, its key is only cleaned up
   const AAR_LEGENDARY_KEY = "wm-auction-archive-legendary";
-  // Stored in a record's "terms" for the auctions found by the Legendary toggle (no search term involved)
-  const AAR_LEGENDARY_LABEL = "rarity:L";
+  // Rarity codes a term can be limited to ("acteur:L+UR"), rarest first, with the colours the site and the dashboard use
+  const AAR_RARITIES = ["L", "UR", "SR", "R", "PC", "C"];
+  const AAR_RARITY_COLORS = {
+    C: "#b8f2d5",
+    PC: "#b1cff2",
+    R: "#c6a7f2",
+    SR: "#ed6fa3",
+    UR: "#fa9931",
+    L: "#ffe144",
+  };
   const AAR_LOCK_NAME = "wmb-auction-archive-crawler";
   const AAR_CHANNEL_NAME = "wmb-auction-archive";
   const AAR_TICK_MS = 5 * 60 * 1000;
@@ -11453,8 +11465,6 @@ const MY_USERNAME = "xxx";
   const AAR_MIN_GAP_MS = 30 * 1000;
   const AAR_PAGE_SIZE = 50;
   const AAR_MAX_PAGES = 100;
-  // The Legendary source only needs its newest pages once the first full scan has been made
-  const AAR_LEGENDARY_MAX_PAGES = 20;
   const AAR_REQUEST_PACING_MS = 1200;
   const AAR_SETTLE_MARGIN_MS = 30 * 1000;
   const AAR_RESOLVE_BUDGET_MS = 3 * 60 * 1000;
@@ -11546,26 +11556,67 @@ const MY_USERNAME = "xxx";
     }
   }
 
-  // The "Légendaires" toggle: every Legendary auction is archived, whatever the search terms
-  function aarReadLegendary() {
-    try {
-      return localStorage.getItem(AAR_LEGENDARY_KEY) === "1";
-    } catch {
-      return false;
+  // A source is a search term, optionally limited to some rarities: "acteur" (every rarity) or "acteur:L+UR".
+  // The text after the LAST colon must then be rarity codes (AAR_RARITIES) joined by "+", in any case and order. The
+  // normalised text (codes upper-cased, rarest first) is the source's "label": what is stored in the terms list, in
+  // the records' "terms" and shown in the status. A source that doesn't parse has an "error" and keeps its raw text
+  // as label. A rarity with no term (":L") is not supported: it would return far too many auctions to follow.
+  function aarParseSource(text) {
+    const raw = text.trim();
+    const cut = raw.lastIndexOf(":");
+    let keyword = raw;
+    let rarities = [];
+    let error = null;
+    if (cut !== -1) {
+      keyword = raw.slice(0, cut).trim();
+      const codes = raw
+        .slice(cut + 1)
+        .split("+")
+        .map((code) => code.trim().toUpperCase())
+        .filter(Boolean);
+      const unknown = codes.filter((code) => !AAR_RARITIES.includes(code));
+      if (!keyword) error = "mot-clé manquant (une rareté seule n'est pas prise en charge)";
+      else if (!codes.length) error = "rareté manquante après « : »";
+      else if (unknown.length) error = `rareté inconnue : ${unknown.join(", ")}`;
+      else rarities = AAR_RARITIES.filter((code) => codes.includes(code));
     }
+    const label = error
+      ? raw
+      : rarities.length
+        ? `${keyword}:${rarities.join("+")}`
+        : keyword;
+    return { keyword, rarities, label, error };
   }
 
-  function aarParseTermsInput(text) {
+  // Sources typed in the box (commas or line breaks), without duplicates
+  function aarParseSources(text) {
     const seen = new Set();
     return text
       .split(/[,\n]/)
       .map((term) => term.trim())
-      .filter((term) => {
-        const key = term.toLowerCase();
-        if (!term || seen.has(key)) return false;
+      .filter(Boolean)
+      .map(aarParseSource)
+      .filter((source) => {
+        const key = source.label.toLowerCase();
+        if (seen.has(key)) return false;
         seen.add(key);
         return true;
       });
+  }
+
+  // The saved sources that can be crawled (an unparsable one, e.g. a stored term with an odd colon, is skipped)
+  function aarReadSources() {
+    return aarReadTerms()
+      .map(aarParseSource)
+      .filter((source) => !source.error);
+  }
+
+  // Query string part that selects a source's auctions: q={keyword}[&rarity=L&rarity=UR]
+  function aarSourceFilter(source) {
+    return (
+      `q=${encodeURIComponent(source.keyword)}` +
+      source.rarities.map((code) => `&rarity=${code}`).join("")
+    );
   }
 
   function aarReadStatus() {
@@ -12077,21 +12128,12 @@ const MY_USERNAME = "xxx";
     aarSetStatus({ lastTickStartedAt: started, phase: "running" });
 
     try {
-      const terms = aarReadTerms();
-      const legendary = aarReadLegendary();
-      // The searched terms come first; the Legendaries are a bonus, last and capped, so a failure there costs nothing
-      for (const term of terms) {
-        await aarCrawlTracked(term, `q=${encodeURIComponent(term)}`);
-      }
-      if (legendary) {
-        await aarCrawlTracked(
-          AAR_LEGENDARY_LABEL,
-          "rarity=L",
-          AAR_LEGENDARY_MAX_PAGES,
-        );
+      const sources = aarReadSources();
+      for (const source of sources) {
+        await aarCrawlTracked(source.label, aarSourceFilter(source));
       }
       aarSetStatus({ lastError: null });
-      if (terms.length === 0 && !legendary) return AAR_IDLE_MS;
+      if (sources.length === 0) return AAR_IDLE_MS;
       return Math.max(AAR_MIN_GAP_MS, AAR_TICK_MS - (Date.now() - started));
     } catch (error) {
       if (error instanceof AarRateLimitError) {
@@ -12662,18 +12704,15 @@ const MY_USERNAME = "xxx";
         `Espace utilisé par le site dans le navigateur : ${aarFormatBytes(storage.usage)}${storage.quota ? ` sur ${aarFormatBytes(storage.quota)} disponibles` : ""}`,
       );
     }
-    if (
-      aarReadTerms().length === 0 &&
-      !termsInput.value.trim() &&
-      !aarReadLegendary()
-    ) {
-      lines.push(
-        "Aucun terme : saisissez-en un (ou activez les Légendaires) pour démarrer la collecte.",
-      );
+    if (aarReadTerms().length === 0 && !termsInput.value.trim()) {
+      lines.push("Aucun terme : saisissez-en un pour démarrer la collecte.");
     }
-    // What each source found at its last pass (Legendaries included, under their internal label)
+    // What each current source found at its last pass (a removed source, or the former Legendary one, is left out)
+    const current = new Set(aarReadTerms());
     for (const [label, source] of Object.entries(status.sources ?? {})) {
-      const name = label === AAR_LEGENDARY_LABEL ? "Légendaires" : `« ${label} »`;
+      if (!current.has(label)) continue;
+
+      const name = `« ${label} »`;
       lines.push(
         source.error
           ? `${name} : dernier scan ${aarFormatTime(source.at)}, refusé par le site (${source.error})`
@@ -12751,6 +12790,14 @@ const MY_USERNAME = "xxx";
     return lines;
   }
 
+  function makeRarityBadge(code) {
+    const badge = document.createElement("span");
+    badge.className = "wm-aar-badge";
+    badge.style.setProperty("--rc", AAR_RARITY_COLORS[code]);
+    badge.textContent = code;
+    return badge;
+  }
+
   function buildAuctionArchiveModal() {
     const overlay = document.createElement("div");
     overlay.className = "wm-settings-overlay";
@@ -12779,7 +12826,7 @@ const MY_USERNAME = "xxx";
     const hint = document.createElement("p");
     hint.className = "wm-settings-hint";
     hint.textContent =
-      "Toutes les 5 minutes, les enchères correspondant à ces termes sont archivées dans votre navigateur, puis leur résultat (prix final, nombre d'enchères et d'enchérisseurs) est relevé une fois terminées. Laissez un onglet wiki-masters.com ouvert.";
+      "Toutes les 5 minutes, les enchères correspondant à ces termes sont archivées dans votre navigateur, puis leur résultat (prix final, nombre d'enchères et d'enchérisseurs) est relevé une fois terminées. Pour limiter un terme à certaines raretés, ajoutez « : » et leurs codes séparés par « + » (acteur:L, avion:UR+SR) ; sans code, toutes les raretés. Laissez un onglet wiki-masters.com ouvert.";
 
     const termsRow = document.createElement("div");
     termsRow.className = "wm-aar-row";
@@ -12790,7 +12837,7 @@ const MY_USERNAME = "xxx";
     termsInput.rows = 3;
     termsInput.spellcheck = false;
     termsInput.placeholder =
-      "Termes séparés par des virgules (ex : avion, bateau). Entrée enregistre, Maj+Entrée va à la ligne.";
+      "Termes séparés par des virgules (ex : avion, acteur:L+UR). Entrée enregistre, Maj+Entrée va à la ligne.";
     termsInput.value = aarReadTerms().join(", ");
 
     const saveBtn = document.createElement("button");
@@ -12798,21 +12845,23 @@ const MY_USERNAME = "xxx";
     saveBtn.className = "wm-aar-btn";
     saveBtn.textContent = "Enregistrer";
 
-    termsRow.append(termsInput, saveBtn);
+    const saveNote = document.createElement("span");
+    saveNote.className = "wm-aar-note";
+    saveNote.hidden = true;
 
-    // Ribbon: archives every Legendary auction too, with no search term
-    const legendaryRibbon = document.createElement("label");
-    legendaryRibbon.className = "wm-aar-ribbon";
+    termsRow.append(termsInput, saveBtn, saveNote);
 
-    const legendaryToggle = document.createElement("input");
-    legendaryToggle.type = "checkbox";
-    legendaryToggle.checked = aarReadLegendary();
+    // The former "Légendaires" toggle is gone (a rarity with no term returns too many auctions to follow)
+    try {
+      localStorage.removeItem(AAR_LEGENDARY_KEY);
+    } catch {
+      // Unwritable storage: the stale key is harmless
+    }
 
-    const legendaryText = document.createElement("span");
-    legendaryText.textContent =
-      "Légendaires : archiver aussi toutes les enchères de cartes Légendaires (sans terme de recherche)";
-
-    legendaryRibbon.append(legendaryToggle, legendaryText);
+    // Live view of the terms as sources: one chip per term, with its rarities. A click on a chip opens its rarity
+    // picker, which rewrites that term in the box above
+    const sourcesBox = document.createElement("div");
+    sourcesBox.className = "wm-aar-sources";
 
     const statusBox = document.createElement("div");
     statusBox.className = "wm-aar-status";
@@ -12831,12 +12880,127 @@ const MY_USERNAME = "xxx";
 
     const refresh = () => aarRenderStatus(statusBox, termsInput);
 
+    let picked = null; // index (in the parsed list) of the chip whose rarity picker is open
+    const writeSources = (sources) => {
+      termsInput.value = sources.map((source) => source.label).join(", ");
+      renderSources();
+    };
+    const renderSources = () => {
+      const sources = aarParseSources(termsInput.value);
+      if (picked !== null && picked >= sources.length) picked = null;
+      sourcesBox.replaceChildren();
+
+      const dirty =
+        sources.map((source) => source.label).join("\n") !==
+        aarReadTerms().join("\n");
+      const hasError = sources.some((source) => source.error);
+      saveNote.hidden = !dirty && !hasError;
+      saveNote.className = `wm-aar-note${hasError ? " wm-aar-note-error" : ""}`;
+      saveNote.textContent = hasError
+        ? "Corrigez les termes en rouge avant d'enregistrer"
+        : "Modifications non enregistrées";
+
+      if (!sources.length) return;
+
+      const chips = document.createElement("div");
+      chips.className = "wm-aar-chips";
+      sources.forEach((source, index) => {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = `wm-aar-chip${source.error ? " wm-aar-chip-error" : ""}`;
+        chip.setAttribute("aria-pressed", String(picked === index));
+        chip.title = source.error ?? "Cliquer pour choisir les raretés";
+
+        const name = document.createElement("span");
+        name.textContent = source.error ? source.label : source.keyword;
+        chip.appendChild(name);
+        if (!source.error) {
+          if (!source.rarities.length) {
+            const all = document.createElement("span");
+            all.className = "wm-aar-all";
+            all.textContent = "toutes";
+            chip.appendChild(all);
+          }
+          source.rarities.forEach((code) => chip.appendChild(makeRarityBadge(code)));
+        } else {
+          const warn = document.createElement("span");
+          warn.textContent = "⚠";
+          chip.appendChild(warn);
+        }
+        chip.addEventListener("click", () => {
+          picked = picked === index ? null : index;
+          renderSources();
+        });
+        chips.appendChild(chip);
+      });
+      sourcesBox.appendChild(chips);
+
+      if (picked === null) return;
+
+      const source = sources[picked];
+      const picker = document.createElement("div");
+      picker.className = "wm-aar-picker";
+
+      const caption = document.createElement("span");
+      caption.className = "wm-aar-picker-caption";
+      caption.textContent = source.error
+        ? `${source.error}. Corrigez-le dans la zone de texte, ou retirez-le.`
+        : `« ${source.keyword} » — raretés (aucune : toutes) :`;
+      picker.appendChild(caption);
+
+      if (!source.error) {
+        AAR_RARITIES.slice()
+          .reverse()
+          .forEach((code) => {
+            const toggle = document.createElement("button");
+            toggle.type = "button";
+            toggle.className = "wm-aar-rarity-toggle";
+            toggle.setAttribute("aria-pressed", String(source.rarities.includes(code)));
+            toggle.style.setProperty("--rc", AAR_RARITY_COLORS[code]);
+            toggle.textContent = code;
+            toggle.addEventListener("click", () => {
+              const next = AAR_RARITIES.filter((other) =>
+                other === code
+                  ? !source.rarities.includes(code)
+                  : source.rarities.includes(other),
+              );
+              sources[picked] = aarParseSource(
+                next.length ? `${source.keyword}:${next.join("+")}` : source.keyword,
+              );
+              writeSources(sources);
+            });
+            picker.appendChild(toggle);
+          });
+      }
+
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "wm-aar-btn";
+      remove.textContent = "Retirer ce terme";
+      remove.addEventListener("click", () => {
+        sources.splice(picked, 1);
+        picked = null;
+        writeSources(sources);
+      });
+      picker.appendChild(remove);
+      sourcesBox.appendChild(picker);
+    };
+    termsInput.addEventListener("input", renderSources);
+    renderSources();
+
     const save = () => {
+      const sources = aarParseSources(termsInput.value);
+      if (sources.some((source) => source.error)) {
+        renderSources();
+        return;
+      }
+
       localStorage.setItem(
         AAR_TERMS_KEY,
-        JSON.stringify(aarParseTermsInput(termsInput.value)),
+        JSON.stringify(sources.map((source) => source.label)),
       );
       termsInput.value = aarReadTerms().join(", ");
+      renderSources();
       // Asks the browser not to evict the archive when the disk runs low
       navigator.storage?.persist?.().catch(() => {});
       aarWake();
@@ -12849,22 +13013,6 @@ const MY_USERNAME = "xxx";
         save();
       }
     });
-    legendaryToggle.addEventListener("change", () => {
-      try {
-        localStorage.setItem(
-          AAR_LEGENDARY_KEY,
-          legendaryToggle.checked ? "1" : "0",
-        );
-      } catch {
-        // Unwritable storage: the toggle just won't stick
-      }
-      if (legendaryToggle.checked) {
-        navigator.storage?.persist?.().catch(() => {});
-        aarWake();
-      }
-      refresh();
-    });
-
     const scanRow = document.createElement("div");
     scanRow.className = "wm-aar-row";
     scanRow.append(
@@ -13041,7 +13189,7 @@ const MY_USERNAME = "xxx";
     // Two tabs, so neither the (long) status nor the export tools push the other out of view
     const collectPanel = document.createElement("div");
     collectPanel.className = "wm-aar-panel";
-    collectPanel.append(hint, termsRow, legendaryRibbon, statusBox, scanRow);
+    collectPanel.append(hint, termsRow, sourcesBox, statusBox, scanRow);
 
     const exportPanel = document.createElement("div");
     exportPanel.className = "wm-aar-panel";
@@ -13239,25 +13387,87 @@ const MY_USERNAME = "xxx";
       .wm-aar-btn:hover {
         background: color-mix(in srgb, var(--color-accent) 20%, transparent);
       }
-      .wm-aar-ribbon {
+      .wm-aar-note {
+        align-self: center;
+        font-size: 0.75rem;
+        color: #f59e0b;
+      }
+      .wm-aar-note[hidden] {
+        display: none;
+      }
+      .wm-aar-note-error {
+        color: #ef4444;
+      }
+      .wm-aar-sources:empty {
+        display: none;
+      }
+      .wm-aar-chips {
         display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        margin: 0.5rem 0;
+      }
+      .wm-aar-chip {
+        display: inline-flex;
         align-items: center;
-        gap: 0.6rem;
+        gap: 0.3rem;
+        padding: 0.2rem 0.55rem;
+        border-radius: 999px;
+        border: 1px solid var(--color-border);
+        background: transparent;
+        color: var(--color-foreground);
+        font-size: 0.8rem;
+        cursor: pointer;
+      }
+      .wm-aar-chip:hover,
+      .wm-aar-chip[aria-pressed="true"] {
+        border-color: var(--color-accent);
+        background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+      }
+      .wm-aar-chip-error {
+        border-color: #ef4444;
+        color: #ef4444;
+      }
+      .wm-aar-all {
+        opacity: 0.55;
+        font-size: 0.7rem;
+      }
+      .wm-aar-badge {
+        padding: 0 0.35rem;
+        border-radius: 0.3rem;
+        background: var(--rc);
+        color: #1f2937;
+        font-size: 0.7rem;
+        font-weight: 700;
+      }
+      .wm-aar-picker {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.4rem;
         margin: 0.5rem 0;
         padding: 0.5rem 0.75rem;
         border-radius: 0.5rem;
-        border: 1px solid #f59e0b;
-        background: color-mix(in srgb, #f59e0b 12%, transparent);
+        border: 1px solid var(--color-border);
+      }
+      .wm-aar-picker-caption {
+        flex: 1 1 100%;
         font-size: 0.8rem;
-        font-weight: 600;
+      }
+      .wm-aar-rarity-toggle {
+        min-width: 2.4rem;
+        padding: 0.25rem 0.5rem;
+        border-radius: 0.4rem;
+        border: 1px solid var(--rc, var(--color-border));
+        background: transparent;
+        color: var(--color-foreground);
+        font-size: 0.8rem;
+        font-weight: 700;
         cursor: pointer;
       }
-      .wm-aar-ribbon input {
-        flex: none;
-        width: 1rem;
-        height: 1rem;
-        accent-color: #f59e0b;
-        cursor: pointer;
+      .wm-aar-rarity-toggle[aria-pressed="true"] {
+        background: var(--rc);
+        color: #1f2937;
       }
       .wm-aar-cloud {
         margin-top: 0.75rem;
